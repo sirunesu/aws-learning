@@ -1,3 +1,22 @@
-*.tfstate*
+# Terraform State Files（除外：機密情報含む）
+*.tfstate
+*.tfstate.*
+!*.tfstate.lock.hcl
+
+# Terraform Directories（除外：自動生成）
 .terraform/
+.terraform.lock.hcl
+
+# OS Files
 .DS_Store
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Logs
+*.log
