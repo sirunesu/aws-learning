@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Master Stack - Nested Stacks'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: learning
+
+  Environment:
+    Type: String
+    Default: prod
+
+Resources:
+  # 子スタック1：VPC Stack
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/learning-cf-templates-1781657199/vpc-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcCidr: 10.0.0.0/16
+      TimeoutInMinutes: 15
+
+  # 子スタック2：EC2・RDS Stack（VPC Stack に依存）
+  EC2RDSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: VPCStack
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/learning-cf-templates-1781657199/ec2-rds-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+      TimeoutInMinutes: 30
+
+Outputs:
+  VPCStackId:
+    Description: VPC Stack ID
+    Value: !Ref VPCStack
+
+  EC2RDSStackId:
+    Description: EC2RDS Stack ID
+    Value: !Ref EC2RDSStack
+
+  VPCId:
+    Description: VPC ID from nested stack
+    Value: !GetAtt VPCStack.Outputs.VpcId
+
+  ALBDnsName:
+    Description: ALB DNS from nested stack
+    Value: !GetAtt EC2RDSStack.Outputs.ALBDnsName
+
+  DBEndpoint:
+    Description: DB Endpoint from nested stack
+    Value: !GetAtt EC2RDSStack.Outputs.DBEndpoint

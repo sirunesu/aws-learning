@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 and RDS Stack'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: learning
+    Description: Project name (must match VPC Stack ProjectName)
+
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - staging
+      - dev
+    Description: Environment name (must match VPC Stack Environment)
+
+Resources:
+  # ----------------------------------------
+  # Security Groups（3層設計）
+  # ----------------------------------------
+
+  # Layer 1：ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-vpc-id-${Environment}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-alb-sg-${Environment}
+
+  # Layer 2：Application Security Group
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for application
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-vpc-id-${Environment}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-app-sg-${Environment}
+
+  # Layer 3：RDS Security Group
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-vpc-id-${Environment}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-rds-sg-${Environment}
+
+  # ----------------------------------------
+  # Secrets Manager（RDSパスワード管理）
+  # ----------------------------------------
+  DBPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/rds/password
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"admin"}'
+        GenerateStringKey: password
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+
+  # ----------------------------------------
+  # RDS MySQL（Free Tier 対応版）
+  # ----------------------------------------
+
+  # RDS DB Subnet Group（2AZ必須）
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - Fn::ImportValue: !Sub ${ProjectName}-public-subnet-1-${Environment}
+        - Fn::ImportValue: !Sub ${ProjectName}-public-subnet-2-${Environment}
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-db-subnet-group-${Environment}
+
+  # RDS DB Instance（Free Tier：db.t3.micro + MySQL）
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-mysql-${Environment}
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: '8.0'
+      MasterUsername: admin
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DBPassword}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      AllocatedStorage: '20'
+      StorageType: gp2
+      StorageEncrypted: false
+      BackupRetentionPeriod: 1
+      PreferredBackupWindow: 03:00-04:00
+      PreferredMaintenanceWindow: sun:04:00-sun:05:00
+      MultiAZ: false
+      PubliclyAccessible: false
+      EnableCloudwatchLogsExports:
+        - error
+        - general
+        - slowquery
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-mysql-${Environment}
+
+
+  # ----------------------------------------
+  # ALB（Application Load Balancer）
+  # ----------------------------------------
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${ProjectName}-alb-${Environment}
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - Fn::ImportValue: !Sub ${ProjectName}-public-subnet-1-${Environment}
+        - Fn::ImportValue: !Sub ${ProjectName}-public-subnet-2-${Environment}
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-alb-${Environment}
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ProjectName}-tg-${Environment}
+      Port: 8080
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-vpc-id-${Environment}
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetType: instance
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-tg-${Environment}
+
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !GetAtt ALB.LoadBalancerArn
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !GetAtt TargetGroup.TargetGroupArn
+
+Outputs:
+  ALBDnsName:
+    Description: DNS name of the ALB
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-ALBDnsName
+
+  DBEndpoint:
+    Description: RDS endpoint
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DBEndpoint
+
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !GetAtt TargetGroup.TargetGroupArn
+    Export:
+      Name: !Sub ${AWS::StackName}-TargetGroupArn
